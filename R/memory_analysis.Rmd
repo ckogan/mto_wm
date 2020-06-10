@@ -6,7 +6,7 @@ output:
   pdf_document: default
   html_document: default
 ---
-
+<!-- This is after making updates from the article review -->
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, cache = T, warning = F, message = F)
 
@@ -27,7 +27,7 @@ library(foreign)
 # Subjective Chisquare test
 
 ```{r}
-subj_reports <- read.spss('../data/Chi Square for Subjective Reports.sav') %>% 
+subj_reports <- read.spss('./data/Chi Square for Subjective Reports.sav') %>% 
   as.data.frame %>%
   filter(!is.na(Reason))
 res <- chisq.test(subj_reports$CupChoice, subj_reports$Reason, correct = F)
@@ -41,22 +41,22 @@ fisher.test( subj_reports$CupChoice == "Procrastinate", subj_reports$Reason == "
 
 We read in the the memory span data from the file Span Scores and P(Close) Scores.xlsx. The ospan, rotspan and sspan data are scaled by subtracting the mean and dividing by the standard deviation. Furthermore, we compute an average memory score by averaging ospan, rotspan and sspan. 
 ```{r import}
-mem <- read_excel("../data/Span Scores and P(Close) Scores.xlsx")
+mem <- read_excel("./data/Span Scores and P(Close) Scores.xlsx")
 names(mem) <- c("subject", "p_close", "ospan", "rotspan", "sspan")
 mem <- mem[-1,]
 
 mem <- mem %>% 
   mutate_at(vars(ospan, rotspan, sspan), funs(as.numeric(.))) %>%
-  mutate_at(vars(ospan, rotspan, sspan), funs(as.numeric(scale(.)))) %>%
+  # mutate_at(vars(ospan, rotspan, sspan), funs(as.numeric(scale(.)))) %>%
   mutate(
-    mem_avg = (ospan + rotspan + sspan) / 3,
+    mem_tot = (ospan + rotspan + sspan),
     subject = subject
   )
 ```
 
 We read in the MTO logit data from the file Logit_Data.xlsx and the first trial data from the file First Trial PC Frequency. The first trial is joined into the MTO logit data. Update: This is no longer necessary as the Logit_Data was modified to include trial number. 
 ```{r}
-cup <- read_excel("../data/Logit_Data.xlsx")
+cup <- read_excel("./data/Logit_Data.xlsx")
 names(cup) <- c("subject","trial", "dist", "ratio", "load", "choice", "digit")
 
 
@@ -66,12 +66,12 @@ cup <- cup %>%
     subject = as.character(subject)
     ) %>%
   left_join(
-  mem %>% dplyr::select(subject, ospan, rotspan, sspan, mem_avg)
+  mem %>% dplyr::select(subject, ospan, rotspan, sspan, mem_tot)
 )
 
 ratio_translation <- c("50:100" = 0.5, "100:100" = 1, "100:50" = 2)
 
-ftry <- read_excel("../data/First Trial PC Frequency.xlsx")[1:12,]
+ftry <- read_excel("./data/First Trial PC Frequency.xlsx")[1:12,]
 ix <- sapply(ftry[,3:(ncol(ftry)-3)], function(x) which(!is.na(x))) %>% as.numeric
 
 ftry <- data.frame(subject = colnames(ftry[,3:(ncol(ftry)-3)]), 
@@ -108,21 +108,27 @@ cor.test(mem$rotspan, mem$sspan)
 
 # Mixed effects model with the average of the memory tasks
 
-We fit a logistic mixed effects model to relate the choice of cup to the mem_avg, ratio and interaction between mem_avg:ratio. We conduct likelihood ratio tests for an overall effect of mem_avg, an overall effect of ratio and an interaction between mem_avg and ratio. Below is the model summary along with a table giving the likelihood ratio test statistic along with the p-value for each effect. Note that the mem_avg and ratio rows in the table are testing both the main effect and interaction.
+We fit a logistic mixed effects model to relate the choice of cup to the mem_tot, ratio and interaction between mem_tot:ratio. We conduct likelihood ratio tests for an overall effect of mem_tot, an overall effect of ratio and an interaction between mem_tot and ratio. Below is the model summary along with a table giving the likelihood ratio test statistic along with the p-value for each effect. Note that the mem_tot and ratio rows in the table are testing both the main effect and interaction.
 
 ```{r}
+scaling <- list(mem_tot_mean = mean(cup$mem_tot), mem_tot_sd = sd(cup$mem_tot))
 cup <- cup %>%
-  mutate(choice_far = as.integer(choice == 0))
-mod <- glmer(choice ~  mem_avg + ratio + mem_avg:ratio + (1|subject), 
+  mutate(
+    choice_far = as.integer(choice == 0),
+    mem_tots = (mem_tot - mean(mem_tot))/sd(mem_tot))
+mod <- mixed_model(choice ~  mem_tots + ratio + mem_tots:ratio, random = ~ 1|subject, 
              family = binomial(link = "logit"), data = cup)
+# mod0 <- glmer(choice ~  mem_tots + ratio + mem_tots:ratio + (1|subject), 
+#              family = binomial(link = "logit"), data = cup)
 
 
-terms <- c("mem_avg", "ratio", "mem_avg:ratio")
+terms <- c("mem_tots", "ratio", "mem_tots:ratio")
 comp_mod <- function(terms, mod, ...) {
-  form <- as.formula(paste0("choice ~ ", paste(terms, collapse = "+"), "+ (1|subject)"))
-  mod_i <- glmer(form, family = binomial(link = "logit"), data = cup, ...)
+  form <- as.formula(paste0("choice ~ ", paste(terms, collapse = "+")))
+  # mod_i <- glmer(form, family = binomial(link = "logit"), data = cup, ...)
+  mod_i <- mixed_model(form, random = ~ 1|subject, family = binomial(link = "logit"), data = cup, ...)
   an <- anova(mod_i, mod)
-  c(an$Chisq[2], an$`Pr(>Chisq)`[2])
+  c(an$LRT, an$p.value)
 }
 
 summary(mod)
@@ -137,18 +143,41 @@ K <- rbind(
   "ratio2-.5" = c(0, 0, 0, 1, 0, 0),
   "ratio2-1"  = c(0, 0, -1, 1, 0, 0)
 )
-(sm <- summary(glht(mod, K), test = univariate()))
+wrap <- function(obj) {
+  lst <- list(obj)
+  attr(lst, "class") <- "wrap"
+  lst
+}
+vcov.wrap <- function(obj,...) {
+  vc <- vcov(obj[[1]])
+  n <- dim(vc)[1]
+  vc[-n, -n]
+}
+coef.wrap <- function(obj, ...) {
+  coef(summary(obj[[1]]))[,1]
+}
+model.matrix.wrap <- function(obj, ...) {
+  model.matrix(obj[[1]])
+}
+model.frame.wrap <- function(obj, ...) {
+  model.frame(obj[[1]])
+}
+terms.wrap <- function(obj, ...) {
+  terms(obj[[1]])
+}
+w <- wrap(mod)
+(sm <- summary(glht(w, K), test = univariate()))
 round(binomial()$linkinv(sm$test$coefficients[c(1,3,5)]),3)
 round(exp(sm$test$coefficients[c(2,4,6)]),3)
 cbind(sm$test$tstat^2, sm$test$pvalues)
- 
 
+1/exp(confint(mod))
 ```
 
 ## ANOVA Table
 ```{r}
 aov_table <- cbind(
-  mem_avg = comp_mod(terms[-c(1, 3)], mod),
+  mem_tots = comp_mod(terms[-c(1, 3)], mod),
   ratio = comp_mod(terms[-c(2, 3)], mod),
   interaction = comp_mod(terms[-c(3)], mod)
 )
@@ -159,17 +188,18 @@ t(round(aov_table, 3))
 
 
 # Plot of memory span effect
-We use the model with mem_avg and ratio (described above) to plot the estimated average log odds of choosing the first cup first for the 3 different ratios, and memory span scores ranging between 0 and 1. 
+We use the model with mem_tots and ratio (described above) to plot the estimated average log odds of choosing the first cup first for the 3 different ratios, and memory span scores ranging between 0 and 1. 
 
 ```{r}
-avg_lo <- function(mem_avg) {
-  contr1 <- rbind("50:100" = c(1, mem_avg, 0, 0, 0, 0),
-                  "100:100" = c(1, mem_avg, 1, 0, mem_avg, 0),
-                  "100:50" = c(1, mem_avg, 0, 1, 0, mem_avg))
-  
-  beta <- matrix(coefficients(summary(mod))[,1])
-  est <- contr1 %*% beta
-  vc <- vcov(summary(mod))
+mc <- marginal_coefs(mod, std_errors = T)
+avg_lo <- function(mem_tot) {
+  mem_tots <- (mem_tot - scaling$mem_tot_mean) / scaling$mem_tot_sd
+  contr1 <- rbind("50:100" = c(1, mem_tots, 0, 0, 0, 0),
+                  "100:100" = c(1, mem_tots, 1, 0, mem_tots, 0),
+                  "100:50" = c(1, mem_tots, 0, 1, 0, mem_tots))
+  beta <- as.matrix(mc$betas)
+  est <- contr1 %*% beta  
+  vc <- mc$var_betas
   vars <- contr1 %*% vc %*% t(contr1) %>% diag
   # p-values for (0.5 group, 1.0 group, 2.0 group)
   pvals <- 1 - pnorm(est / sqrt(vars))
@@ -184,56 +214,39 @@ avg_lo <- function(mem_avg) {
   df$ratio <- row.names(df)
   df
 }
-mem_avgs <- seq(-2,2, by = 1)
-res <- do.call(rbind,lapply(mem_avgs, avg_lo))
-res$mem_avgs <- rep(mem_avgs, each = 3)
-
-dwidth = 2
-ewidth = 0.5
-
-res %>%   
-  mutate(
-    ratio = fct_relevel(ratio, c("50:100", "100:100", "100:50"))
-  ) %>%
-  ggplot(aes(x = mem_avgs, y = est, ymin = low, ymax = high, colour = ratio)) +
-  # geom_point(position = position_dodge(width = dwidth)) + 
-  geom_line() + 
-  # geom_errorbar(position = position_dodge(width = dwidth), width = ewidth) +
-  labs(y = "Log Odds of Selecting Close Cup First", x = "Average Working Memory Span Z-Scores") + 
-  # labs(colour = "Close-to-Far Cup Water Ratio") + 
-  scale_y_continuous(limits = c(-8,8))
 
 
-mem_avgs <- seq(-2,2, by = 0.1)
-res <- do.call(rbind,lapply(mem_avgs, avg_lo))
-res$mem_avgs <- rep(mem_avgs, each = 3)
+mem_totv <- 28:63 #seq(-2,2, by = 1) # 28:63
+res <- do.call(rbind,lapply(mem_totv, avg_lo))
+res$mem_totv <- rep(mem_totv, each = 3)
 
 res %>%   
   mutate(
-    ratio = fct_relevel(ratio, c("50:100", "100:100", "100:50"))
+    ratio = fct_relevel(ratio, c("50:100", "100:100", "100:50")),
+    prob = binomial()$linkinv(est),
+    low = binomial()$linkinv(low),
+    high = binomial()$linkinv(high)
   ) %>%
-  ggplot(aes(x = mem_avgs, y = est, ymin = low, ymax = high, colour = ratio)) +  geom_line() + geom_ribbon(alpha = 0.3) +
-  labs(y = "Log Odds of Selecting Close Cup First", x = "Average Working Memory Span Z-Scores") + labs(colour = "ratio") + 
-  scale_y_continuous(limits = c(-8,8)) + facet_wrap(~ratio)
-
-
-
+  ggplot(aes(x = mem_totv, y = prob, ymin = low, ymax = high, colour = ratio)) +  geom_line() + geom_ribbon(alpha = 0.3) +
+  labs(y = "Probability of Selecting Close Cup First", x = "Working Memory Span") + labs(colour = "ratio") + 
+  scale_y_continuous(labels = c("0%", "25%", "50%", "75%", "100%"),limits = c(0,1)) + facet_wrap(~ratio) + theme(legend.position="none")
 
 ```
 
 # Two sided test for precrastination
-We use the model with mem_avg and ratio (described above) to conduct Wald tests to test whether the average log odds of choosing the first cup first is equal to zero. We also conduct this test separately for each ratio. 
+We use the model with mem_tots and ratio (described above) to conduct Wald tests to test whether the average log odds of choosing the first cup first is equal to zero. We also conduct this test separately for each ratio. 
 
 ```{r}
 
 contr1 <- rbind("combined" = c(1, 0, 1/3, 1/3, 0, 0),
                 "50:100" = c(1, 0, 0, 0, 0, 0),
                 "100:100" = c(1, 0, 1, 0, 0, 0),
+                 #"100:50" = c(0, 1, 0, 0, 1, 0))
                 "100:50" = c(1, 0, 0, 1, 0, 0))
 
-beta <- matrix(coefficients(summary(mod))[,1])
+beta <- as.matrix(mc$betas)#beta <- matrix(coefficients(summary(mod))[,1])
 est <- contr1 %*% beta
-vc <- vcov(summary(mod))
+vc <- mc$var_betas
 vars <- contr1 %*% vc %*% t(contr1) %>% diag
 # p-values for (0.5 group, 1.0 group, 2.0 group)
 (waldstat <- est / sqrt(vars))
@@ -245,61 +258,34 @@ high <- est + qnorm(0.975)*sqrt(vars)
 # lower ci for (0.5 group, 1.0 group, 2.0 group)
 low <- est - qnorm(0.975)*sqrt(vars)
 
-data.frame(pvals, high, low) %>% kable(digits = 5)
+data.frame(pvals, high, low) %>% 
+  mutate(prob = 1 / (1 + exp(-est)),
+         plow = 1 / (1 + exp(-low)),
+         phigh = 1 / (1 + exp(-high))) %>%
+  kable(digits = 5)
 
 ```
 
 # Post-hoc tests for ratio
 
-We use the model with mem_avg and ratio (described above) the method of Westfall 1997 to conduct post-hoc tests between all 3 ratios.
+We use the model with mem_tots and ratio (described above) the method of Westfall 1997 to conduct post-hoc tests between all 3 ratios.
 ```{r}
 library(multcomp)
-summary(glht(mod, mcp(ratio = "Tukey")), test = adjusted(type = "Westfall"))
-```
-
-
-# Mixed model with all 3 memory variables
-
-We fit a logistic mixed effects model to relate the choice of cup to the ospan, rotspan sspan, and ratio. We conduct a likelihood ratio test ANOVA to test for an overall effect of each memory variable. Below is the model summary along with a table giving the likelihood ratio test statistic along with the p-value for each effect. 
-```{r glmmadaptive}
-# mod <- mixed_model(fixe = choice ~  ospan + rotspan + sspan + ratio  , 
-#random = ~ 1|subject, family = binomial(link = "logit"), data = cup)
-
-mod <- glmer(choice ~  ospan + rotspan + sspan + ratio + (1|subject), 
-             family = binomial(link = "logit"), data = cup)
-
-terms <- c("ospan", "rotspan", "sspan", "ratio")
-
-summary(mod)
-```
-
-## ANOVA table
-```{r}
-aov_table <- cbind(
-  # mem_tot = comp_mod(terms[-c(1:3)]),
-  ospan = comp_mod(terms[-1], mod),
-  rotspan = comp_mod(terms[-2], mod),
-  sspan = comp_mod(terms[-3], mod),
-  ratio = comp_mod(terms[-c(4)], mod)
-)
-
-row.names(aov_table) <- c("LRT", "p-value")
-
-t(round(aov_table, 3))
+summary(glht(w, mcp(ratio = "Tukey")), test = adjusted(type = "Westfall"))
 ```
 
 
 # Model with spline for trial number
 
-We fit a logistic mixed effects model to relate the choice of cup to mem_avg, ratio and trial number. The trial # is included as a natural cubic spline with three knots. All second order interactions are included, however, the interactions with trial are limited to being linear in the effect of trial#. We conduct a likelihood ratio test ANOVA to test for an overall effect of each variable along with testing each of the three interactions.
+We fit a logistic mixed effects model to relate the choice of cup to mem_tots, ratio and trial number. The trial # is included as a natural cubic spline with three knots. All second order interactions are included, however, the interactions with trial are limited to being linear in the effect of trial#. We conduct a likelihood ratio test ANOVA to test for an overall effect of each variable along with testing each of the three interactions.
 
 ```{r}
 mycontrol <- glmerControl(optimizer="bobyqa",
                             optCtrl=list(maxfun=2e5))
 cup$ratiog <- cup$ratio == "0.5"
 
-terms <- c("mem_avg", "ratio", "mem_avg:ratio", "rcs(trial, 3)", "mem_avg:trial", "ratio:trial")
-form1 <- choice ~  mem_avg + ratio + mem_avg:ratio + rcs(trial, 3) + mem_avg:trial + 
+terms <- c("mem_tots", "ratio", "mem_tots:ratio", "rcs(trial, 3)", "mem_tots:trial", "ratio:trial")
+form1 <- choice ~  mem_tots + ratio + mem_tots:ratio + rcs(trial, 3) + mem_tots:trial + 
   ratio:trial + (1|subject)
 
 mod <- glmer(form1, 
@@ -307,11 +293,18 @@ mod <- glmer(form1,
 # mod_rms <- lrm(choice ~  mem_avg + ratio + mem_avg:ratio + rcs(trial, 3) + subject, data = cup %>% mutate(subject = factor(subject)), penalty = 1)
 # cov2cor(vcov(mod)) %>% as.matrix %>% image
 # cov2cor(vcov(mod)) %>% as.matrix %>% View
+summary(mod)
 
 ```
 
 ## ANOVA Table
 ```{r}
+comp_mod <- function(terms, mod, ...) {
+  form <- as.formula(paste0("choice ~ ", paste(terms, collapse = "+"), "+ (1|subject)"))
+  mod_i <- glmer(form, family = binomial(link = "logit"), data = cup, ...)
+  an <- anova(mod_i, mod)
+  c(an$Chisq[2], an$`Pr(>Chisq)`[2])
+}
 
 aov_table <- cbind(
   mem_avg = comp_mod(terms[-c(1, 3, 5)], mod),
@@ -326,6 +319,8 @@ row.names(aov_table) <- c("LRT", "p-value")
 t(round(aov_table, 3))
 
 ```
+
+
 
 # Trial Number Plot
 
@@ -342,14 +337,14 @@ t(round(aov_table, 3))
 # [10] "mem_avg:ratio1"      "mem_avg:ratio2"      "mem_avg:trial"      
 # [13] "trial:ratiogTRUE"
 
-mm <- model.matrix(choice ~  mem_avg * ratio + rcs(trial, 3) + mem_avg:trial + ratio:trial, data = cup)
+mm <- model.matrix(choice ~  mem_tots * ratio + rcs(trial, 3) + mem_tots:trial + ratio:trial, data = cup)
 
 emgrid <- as.data.frame(mm) %>% dplyr::select(ratio1, ratio2, `rcs(trial, 3)trial`, `rcs(trial, 3)trial'`) %>% unique %>% arrange(`rcs(trial, 3)trial`) %>%
   group_by_all() %>%
-  do(data.frame(mem_avg = c(-1, 0, 1))) %>%
+  do(data.frame(mem_tots = c(-1, 0, 1))) %>%
   ungroup
 
-emgrid <- with(emgrid, cbind(1, mem_avg, ratio1, ratio2, `rcs(trial, 3)trial`, `rcs(trial, 3)trial'`, mem_avg*ratio1, mem_avg*ratio2, mem_avg*`rcs(trial, 3)trial`, ratio1 * `rcs(trial, 3)trial`, ratio2 * `rcs(trial, 3)trial`))
+emgrid <- with(emgrid, cbind(1, mem_tots, ratio1, ratio2, `rcs(trial, 3)trial`, `rcs(trial, 3)trial'`, mem_tots*ratio1, mem_tots*ratio2, mem_tots*`rcs(trial, 3)trial`, ratio1 * `rcs(trial, 3)trial`, ratio2 * `rcs(trial, 3)trial`))
 
 lodds <- emgrid %*% coef(summary(mod))[,1]
 model_avg <- emgrid %>% as.data.frame %>%
@@ -359,7 +354,7 @@ model_avg <- emgrid %>% as.data.frame %>%
     ratio = fct_recode(ratio,"50:100"="0.0","100:100"="1.0", "100:50"="0.1"),
     lodds = lodds[,1]
   ) %>%
-  dplyr::select(trial, ratio, lodds, mem_avg)
+  dplyr::select(trial, ratio, lodds, mem_tots)
 
 vbeta <- emgrid %*% vcov(mod) %*% t(emgrid)
 sbeta <- sqrt(diag(vbeta))
@@ -372,16 +367,14 @@ model_avg <- model_avg %>%
     high = lodds + qnorm(0.975)*sbeta
   )
 
-model_avg %>% mutate(mem_avg = factor(mem_avg, levels = c("1", "0", "-1"))) %>%
-  ggplot(aes(trial, y = lodds,  ymin = low, ymax = high)) + geom_point(aes(shape = mem_avg), size = 2) +  geom_line(aes(linetype = mem_avg)) + scale_x_continuous(breaks = 1:12, labels = 1:12) + labs(y = "log odds", x = "trial #") + facet_grid(~ratio) + labs(y = "Log Odds of Selecting Close Cup First", x = "Trial Number") + labs(shape = "Average Working \nMemory Span", linetype = "Average Working \nMemory Span") +
-  scale_y_continuous(limits = c(-5.6,2.6))#+ theme(axis.text.x=element_text(angle=45))
+ # mem_tots = fct_recode(mem_tots,paste0("+1 (M=56)"= "1", "0 (M=47)" = "0", "-1 (M=39)" = "-1"))
+model_avg %>% 
+  mutate(mem_tots = factor(mem_tots, levels = c("-1", "0", "1"))
+        ) %>%
+  ggplot(aes(trial, y = lodds,  ymin = low, ymax = high)) + geom_point(aes(shape = mem_tots), size = 3) + scale_shape_manual(values=c(1,17,15)) + geom_line(aes(linetype = mem_tots)) + scale_x_continuous(breaks = 1:12, labels = c("1","","","","","6", "", "","","","","12")) + labs(y = "log odds", x = "trial #") + facet_grid(~ratio) + labs(y = "Log Odds of Selecting Close Cup First", x = "Trial Number") + labs(shape = "Working \nMemory Span", linetype = "Working \nMemory Span") +
+  scale_y_continuous(limits = c(-5.6,2.6))+theme(text = element_text(size=15))#+ theme(axis.text.x=element_text(angle=45))
 
-model_avg %>%mutate(mem_avg = factor(mem_avg)) %>%
-  group_by(ratio, mem_avg) %>% 
-  summarise(lodds = mean(lodds)) %>%
-  ggplot(aes(ratio, lodds, colour = mem_avg)) + geom_point() + geom_line()
 ```
-
 
 
 # References
